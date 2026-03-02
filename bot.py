@@ -21,37 +21,25 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-# Импорты для работы с Kinopoisk API
-try:
-    from kinopoisk_api_unofficial_client import KinopoiskApiClient
-    from kinopoisk_api_unofficial_client.request.digital_release.request_digital_release import DigitalReleaseRequest
-except ImportError:
-    import subprocess, sys
-    print("Пакет kinopoisk-api-unofficial-client не найден, пробую установить...")
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "kinopoisk-api-unofficial-client"])
-        from kinopoisk_api_unofficial_client import KinopoiskApiClient
-        from kinopoisk_api_unofficial_client.request.digital_release.request_digital_release import DigitalReleaseRequest
-        print("Установка kinopoisk-api-unofficial-client завершена успешно.")
-    except Exception as e:
-        print("Не удалось установить kinopoisk-api-unofficial-client:", e)
-        exit(1)
-
+# Импорты для работы с Kinopoisk API (правильный модуль)
+from kinopoisk_unofficial.kinopoisk_api_client import KinopoiskApiClient
+from kinopoisk_unofficial.request.films.digital_release_request import DigitalReleaseRequest
+from kinopoisk_unofficial.model.dictonary.month import Month  # enum месяцев[web:3][web:6]
 
 
 # ==== НАСТРОЙКИ API-КЛЮЧЕЙ ====
 
 # токен Telegram-бота от @BotFather
-TELEGRAM_TOKEN = "8579233339:AAHnjx9an6YQ0tgKDKvikLYv386FBpat_Wk"
+TELEGRAM_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН_ОТ_BOTFATHER"
 
 # API-ключ Kinopoisk API Unofficial
-KINOPOISK_API_KEY = "0f6ffbda-25ef-445c-9004-873dba7ac523"
+KINOPOISK_API_KEY = "ВСТАВЬ_СЮДА_API_КЛЮЧ_КИНОПОИСКА"
 
 # Доступ к YandexGPT через Yandex Cloud (AI Studio)
 # YANDEX_API_KEY — секретный ключ (Api-Key)
 # YANDEX_FOLDER_ID — идентификатор каталога (folder id)
-YANDEX_API_KEY = "AQVNyoc1Fgv0ssfv4XtU2YeOWmo-9XjVd0BrsXP8"
-YANDEX_FOLDER_ID = "ajeagsqhc2vkmb3uvobr"
+YANDEX_API_KEY = "ВСТАВЬ_СЮДА_API_КЛЮЧ_YANDEXGPT"
+YANDEX_FOLDER_ID = "ВСТАВЬ_СЮДА_FOLDER_ID_ИЗ_YANDEX_CLOUD"
 
 # ID чата для авторассылки по понедельникам в 10:00 МСК
 # Вписать вручную ID чата или None (тогда авторассылка не работает)
@@ -108,8 +96,10 @@ def get_digital_releases(year: int, month: int) -> List[Dict]:
     Возвращает список словарей с данными о релизах
     """
     try:
-        request = DigitalReleaseRequest(year=year, month=month)
-        response = kinopoisk_client.digital_release.send_digital_release_request(request)
+        # Month — enum, month — число 1–12
+        month_enum = list(Month)[month - 1]  # Month.JANUARY и т.д.[web:6]
+        request = DigitalReleaseRequest(year, month_enum)
+        response = kinopoisk_client.films.send_digital_release_request(request)[web:3][web:6]
         
         releases = []
         if hasattr(response, 'releases') and response.releases:
@@ -119,7 +109,7 @@ def get_digital_releases(year: int, month: int) -> List[Dict]:
                 if hasattr(release, 'releaseDate') and release.releaseDate:
                     try:
                         release_date = datetime.strptime(release.releaseDate, '%Y-%m-%d').date()
-                    except:
+                    except Exception:
                         continue
                 
                 if not release_date:
@@ -181,13 +171,11 @@ def sort_and_limit_releases(releases: List[Dict], limit: int = 10,
     
     # Если нужна пропорция сериалов/фильмов (для /week)
     if series_count > 0 or movies_count > 0:
-        # Простое определение: если в жанрах есть слова, характерные для сериалов
-        # (в реальности API может иметь поле type, но работаем с тем, что есть)
         series = []
         movies = []
         
         for release in releases_sorted:
-            # Простая эвристика: можно улучшить, если API предоставляет поле type
+            # Здесь можно будет улучшить критерий сериал/фильм
             if len(series) < series_count:
                 series.append(release)
             elif len(movies) < movies_count:
@@ -195,7 +183,6 @@ def sort_and_limit_releases(releases: List[Dict], limit: int = 10,
             else:
                 break
         
-        # Добавляем оставшиеся, если не набрали нужное количество
         result = series + movies
         if len(result) < limit:
             for release in releases_sorted:
