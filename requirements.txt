@@ -1,4 +1,4 @@
 python-telegram-bot==20.7
-kinopoisk-api-unofficial-client==2.2.2
+notkinopoiskapi==1.0.0
 pytz==2024.1
 requests==2.31.0
