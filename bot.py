@@ -22,7 +22,10 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 # notkinopoiskapi — обёртка над Kinopoisk API Unofficial
-from notkinopoiskapi import KpFilms  # фильмы и сериалы[web:78][web:31]
+try:
+    from notkinopoiskapi import KpFilms  # фильмы и сериалы
+except ImportError:
+    KpFilms = None
 
 
 # ==== НАСТРОЙКИ API-КЛЮЧЕЙ ====
@@ -61,7 +64,12 @@ MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 # ==== ИНИЦИАЛИЗАЦИЯ КЛИЕНТА КИНОПОИСКА ====
 
 # KpFilms — эндпоинт фильмов и сериалов в notkinopoiskapi[web:78][web:79]
-kinopoisk_client = KpFilms(KINOPOISK_API_KEY)
+if KpFilms is not None:
+    kinopoisk_client = KpFilms(KINOPOISK_API_KEY)
+else:
+    kinopoisk_client = None
+    logger.warning("notkinopoiskapi не установлен, функции Кинопоиска временно отключены.")
+
 
 
 # ==== ФУНКЦИИ ДЛЯ РАБОТЫ С ДАТАМИ ====
@@ -88,32 +96,23 @@ def get_last_full_week():
 def get_digital_releases(year: int, month: int) -> List[Dict]:
     """
     Получает цифровые релизы за указанный год и месяц.
-    Реализация через notkinopoiskapi:
-    используем общий поиск по фильтрам Kinopoisk API Unofficial.[web:19][web:78]
-
-    Замечание: у notkinopoiskapi нет прямого метода "digital releases",
-    поэтому мы используем фильтры по дате релиза в цифре (если доступны в API).
-    Здесь это примерная схема; при необходимости можно уточнить поля.
+    Если клиент Кинопоиска не инициализирован (нет notkinopoiskapi),
+    возвращает пустой список, чтобы бот не падал.
     """
+    if kinopoisk_client is None:
+        logger.warning("Kinopoisk client не инициализирован, возвращаю пустой список релизов")
+        return []
+
     try:
         # Пример использования общего запроса фильмов:
         # Документация Kinopoisk API Unofficial описывает параметры для фильтрации
-        # по полю "digitalRelease" (цифровой релиз).[web:17][web:19]
+        # по полю "digitalRelease" (цифровой релиз).
         #
-        # Предположим, что notkinopoiskapi предоставляет метод:
-        # kinopoisk_client.get_films(filters=..., page=1)
-        # (Если интерфейс другой — его можно адаптировать по документации.)
-        #
-        # Здесь мы делаем запрос с фильтрацией по году и месяцу цифрового релиза.
-        #
-        # ВАЖНО: Если текущая версия notkinopoiskapi не реализует нужный фильтр,
-        # список вернётся пустым, но бот не упадёт.
+        # Предполагаем, что notkinopoiskapi предоставляет метод:
+        # kinopoisk_client.get_films(filters=..., page=1).
         films = kinopoisk_client.get_films(
             {
                 "year": year,
-                # Дополнительный фильтр по дате цифрового релиза.
-                # Конкретное имя поля зависит от реализации библиотеки и API;
-                # при необходимости можно будет скорректировать.
                 "month": month
             }
         )
@@ -121,15 +120,34 @@ def get_digital_releases(year: int, month: int) -> List[Dict]:
         releases: List[Dict] = []
 
         for film in films:
-            # film — это, как правило, dataclass или dict; опираемся на типичные поля API.[web:17][web:12]
-            kp_id = getattr(film, "kinopoiskId", None) or getattr(film, "kp_id", None) or film.get("kinopoiskId", None)
-            name_ru = getattr(film, "nameRu", None) or film.get("nameRu", "")
-            name_en = getattr(film, "nameEn", None) or film.get("nameEn", "")
-            year_val = getattr(film, "year", None) or film.get("year", None)
+            # film — dataclass или dict
+            kp_id = (
+                getattr(film, "kinopoiskId", None)
+                or getattr(film, "kp_id", None)
+                or (film.get("kinopoiskId", None) if isinstance(film, dict) else None)
+            )
+            name_ru = (
+                getattr(film, "nameRu", None)
+                or (film.get("nameRu", "") if isinstance(film, dict) else "")
+            )
+            name_en = (
+                getattr(film, "nameEn", None)
+                or (film.get("nameEn", "") if isinstance(film, dict) else "")
+            )
+            year_val = (
+                getattr(film, "year", None)
+                or (film.get("year", None) if isinstance(film, dict) else None)
+            )
 
-            # Описание и жанры.
-            description = getattr(film, "description", None) or film.get("description", "")
-            genres_list = getattr(film, "genres", None) or film.get("genres", [])
+            # Описание и жанры
+            description = (
+                getattr(film, "description", None)
+                or (film.get("description", "") if isinstance(film, dict) else "")
+            )
+            genres_list = (
+                getattr(film, "genres", None)
+                or (film.get("genres", []) if isinstance(film, dict) else [])
+            )
             if isinstance(genres_list, list):
                 genres = ", ".join(
                     g.get("genre") if isinstance(g, dict) else str(g)
@@ -138,13 +156,18 @@ def get_digital_releases(year: int, month: int) -> List[Dict]:
             else:
                 genres = str(genres_list)
 
-            # Дата цифрового релиза (если поле есть).
-            digital_date_str = (
-                getattr(film, "digitalRelease", None)
-                or film.get("digitalRelease", None)
-                or getattr(film, "releaseDate", None)
-                or film.get("releaseDate", None)
-            )
+            # Дата цифрового релиза (если поле есть)
+            if isinstance(film, dict):
+                digital_date_str = (
+                    film.get("digitalRelease")
+                    or film.get("releaseDate")
+                )
+            else:
+                digital_date_str = (
+                    getattr(film, "digitalRelease", None)
+                    or getattr(film, "releaseDate", None)
+                )
+
             if not digital_date_str:
                 continue
 
@@ -153,10 +176,15 @@ def get_digital_releases(year: int, month: int) -> List[Dict]:
             except Exception:
                 continue
 
-            # Рейтинги.
-            rating = getattr(film, "ratingKinopoisk", None) or film.get("ratingKinopoisk", 0) or 0
-            expectation_rating = getattr(film, "ratingAwait", None) or film.get("ratingAwait", 0) or 0
-            votes = getattr(film, "ratingKinopoiskVoteCount", None) or film.get("ratingKinopoiskVoteCount", 0) or 0
+            # Рейтинги
+            if isinstance(film, dict):
+                rating = film.get("ratingKinopoisk", 0) or 0
+                expectation_rating = film.get("ratingAwait", 0) or 0
+                votes = film.get("ratingKinopoiskVoteCount", 0) or 0
+            else:
+                rating = getattr(film, "ratingKinopoisk", 0) or 0
+                expectation_rating = getattr(film, "ratingAwait", 0) or 0
+                votes = getattr(film, "ratingKinopoiskVoteCount", 0) or 0
 
             release_data = {
                 "id": kp_id,
