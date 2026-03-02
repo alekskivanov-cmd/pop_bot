@@ -26,9 +26,17 @@ try:
     from kinopoisk_api_unofficial_client import KinopoiskApiClient
     from kinopoisk_api_unofficial_client.request.digital_release.request_digital_release import DigitalReleaseRequest
 except ImportError:
-    print("ОШИБКА: Установите kinopoisk-api-unofficial-client")
-    print("pip install kinopoisk-api-unofficial-client")
-    exit(1)
+    import subprocess, sys
+    print("Пакет kinopoisk-api-unofficial-client не найден, пробую установить...")
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "kinopoisk-api-unofficial-client"])
+        from kinopoisk_api_unofficial_client import KinopoiskApiClient
+        from kinopoisk_api_unofficial_client.request.digital_release.request_digital_release import DigitalReleaseRequest
+        print("Установка kinopoisk-api-unofficial-client завершена успешно.")
+    except Exception as e:
+        print("Не удалось установить kinopoisk-api-unofficial-client:", e)
+        exit(1)
+
 
 
 # ==== НАСТРОЙКИ API-КЛЮЧЕЙ ====
