@@ -28,16 +28,16 @@ from notkinopoiskapi import KpFilms  # фильмы и сериалы[web:78][we
 # ==== НАСТРОЙКИ API-КЛЮЧЕЙ ====
 
 # токен Telegram-бота от @BotFather
-TELEGRAM_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН_ОТ_BOTFATHER"
+TELEGRAM_TOKEN = "8579233339:AAHnjx9an6YQ0tgKDKvikLYv386FBpat_Wk"
 
 # API-ключ Kinopoisk API Unofficial
-KINOPOISK_API_KEY = "ВСТАВЬ_СЮДА_API_КЛЮЧ_КИНОПОИСКА"
+KINOPOISK_API_KEY = "0f6ffbda-25ef-445c-9004-873dba7ac523"
 
 # Доступ к YandexGPT через Yandex Cloud (AI Studio)
 # YANDEX_API_KEY — секретный ключ (Api-Key)
 # YANDEX_FOLDER_ID — идентификатор каталога (folder id)
-YANDEX_API_KEY = "ВСТАВЬ_СЮДА_API_КЛЮЧ_YANDEXGPT"
-YANDEX_FOLDER_ID = "ВСТАВЬ_СЮДА_FOLDER_ID_ИЗ_YANDEX_CLOUD"
+YANDEX_API_KEY = "AQVNyoc1Fgv0ssfv4XtU2YeOWmo-9XjVd0BrsXP8"
+YANDEX_FOLDER_ID = "ajeagsqhc2vkmb3uvobr"
 
 # ID чата для авторассылки по понедельникам в 10:00 МСК
 # Вписать вручную ID чата или None (тогда авторассылка не работает)
