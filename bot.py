@@ -2,15 +2,16 @@
 # -*- coding: utf-8 -*-
 """
 Telegram-бот для отслеживания онлайн-премьер фильмов и сериалов
-Данные: Kinopoisk API Unofficial (через notkinopoiskapi)
+Данные: kinopoisk.dev (ПоискКино API)
 Обработка описаний: YandexGPT
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
+from typing import List, Dict, Optional
+
 import pytz
 import requests
-from typing import List, Dict, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -21,69 +22,46 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-# notkinopoiskapi — обёртка над Kinopoisk API Unofficial
-try:
-    from notkinopoiskapi import KpFilms  # фильмы и сериалы
-except ImportError:
-    KpFilms = None
-
 
 # ==== НАСТРОЙКИ API-КЛЮЧЕЙ ====
 
 # токен Telegram-бота от @BotFather
 TELEGRAM_TOKEN = "8579233339:AAHnjx9an6YQ0tgKDKvikLYv386FBpat_Wk"
 
-# API-ключ Kinopoisk API Unofficial
-KINOPOISK_API_KEY = "0f6ffbda-25ef-445c-9004-873dba7ac523"
+# API-ключ kinopoisk.dev (X-API-KEY)
+KINOPOISK_DEV_KEY = "TS3W9GX-KVZM9ZW-KRYPNWY-D90E8K5"
 
 # Доступ к YandexGPT через Yandex Cloud (AI Studio)
-# YANDEX_API_KEY — секретный ключ (Api-Key)
-# YANDEX_FOLDER_ID — идентификатор каталога (folder id)
 YANDEX_API_KEY = "AQVNyoc1Fgv0ssfv4XtU2YeOWmo-9XjVd0BrsXP8"
 YANDEX_FOLDER_ID = "ajeagsqhc2vkmb3uvobr"
 
 # ID чата для авторассылки по понедельникам в 10:00 МСК
-# Вписать вручную ID чата или None (тогда авторассылка не работает)
 TARGET_CHAT_ID = None
 
 
 # ==== НАСТРОЙКА ЛОГИРОВАНИЯ ====
 
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
 
 # ==== МОСКОВСКИЙ ЧАСОВОЙ ПОЯС ====
 
-MOSCOW_TZ = pytz.timezone('Europe/Moscow')
+MOSCOW_TZ = pytz.timezone("Europe/Moscow")
 
 
-# ==== ИНИЦИАЛИЗАЦИЯ КЛИЕНТА КИНОПОИСКА ====
+# ==== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДАТ ====
 
-# KpFilms — эндпоинт фильмов и сериалов в notkinopoiskapi[web:78][web:79]
-if KpFilms is not None:
-    kinopoisk_client = KpFilms(KINOPOISK_API_KEY)
-else:
-    kinopoisk_client = None
-    logger.warning("notkinopoiskapi не установлен, функции Кинопоиска временно отключены.")
-
-
-
-# ==== ФУНКЦИИ ДЛЯ РАБОТЫ С ДАТАМИ ====
-
-def get_today_date():
-    """Возвращает сегодняшнюю дату в московском часовом поясе"""
+def get_today_date() -> date:
+    """Сегодняшняя дата в московском часовом поясе."""
     return datetime.now(MOSCOW_TZ).date()
 
 
-def get_last_full_week():
-    """
-    Возвращает полную прошлую неделю (понедельник-воскресенье)
-    Возвращает кортеж (start_date, end_date)
-    """
+def get_last_full_week() -> (date, date):
+    """Полная прошлая неделя (понедельник-воскресенье)."""
     today = get_today_date()
     current_monday = today - timedelta(days=today.weekday())
     last_monday = current_monday - timedelta(days=7)
@@ -91,129 +69,139 @@ def get_last_full_week():
     return last_monday, last_sunday
 
 
-# ==== ФУНКЦИИ ДЛЯ РАБОТЫ С KINOPOISK API ЧЕРЕЗ notkinopoiskapi ====
+# ==== РАБОТА С kinopoisk.dev ====
 
-def get_digital_releases(year: int, month: int) -> List[Dict]:
-    """
-    Получает цифровые релизы за указанный год и месяц.
-    Если клиент Кинопоиска не инициализирован (нет notkinopoiskapi),
-    возвращает пустой список, чтобы бот не падал.
-    """
-    if kinopoisk_client is None:
-        logger.warning("Kinopoisk client не инициализирован, возвращаю пустой список релизов")
-        return []
+KINOPOISK_DEV_URL = "https://api.kinopoisk.dev/v1.4/movie"  # универсальный поиск фильмов[web:82][web:103]
 
-    try:
-        # Пример использования общего запроса фильмов:
-        # Документация Kinopoisk API Unofficial описывает параметры для фильтрации
-        # по полю "digitalRelease" (цифровой релиз).
-        #
-        # Предполагаем, что notkinopoiskapi предоставляет метод:
-        # kinopoisk_client.get_films(filters=..., page=1).
-        films = kinopoisk_client.get_films(
-            {
-                "year": year,
-                "month": month
-            }
+
+def _kp_dev_request(params: Dict) -> Dict:
+    """Сделать запрос к kinopoisk.dev с заданными параметрами."""
+    headers = {
+        "X-API-KEY": KINOPOISK_DEV_KEY,
+        "Accept": "application/json",
+    }
+    response = requests.get(KINOPOISK_DEV_URL, headers=headers, params=params, timeout=15)
+    response.raise_for_status()
+    return response.json()
+
+
+def get_releases_for_period(start_date: date, end_date: date) -> List[Dict]:
+    """
+    Получает премьеры (онлайн/цифровые и вообще релизы) за период [start_date, end_date]
+    по данным kinopoisk.dev.
+
+    Стратегия:
+    - Используем универсальный поиск /v1.4/movie с фильтрами:
+      * typeNumber: 1 (фильмы) и 2 (сериалы) — можно расширять.
+      * premiere.world / premiere.russia / releaseYears / yearRange при необходимости.
+    - Здесь для простоты фильтруем по полю 'premiere.world' и 'premiere.russia' по датам,
+      а также по 'year' в разумных пределах.[web:82][web:115]
+    """
+
+    docs: List[Dict] = []
+    page = 1
+    limit = 50
+
+    # kinopoisk.dev позволяет фильтровать по диапазону дат премьеры, но чтобы не усложнять
+    # фильтр на стороне API, мы запрашиваем "окно" по годам и фильтруем по датам в коде.[web:115]
+
+    # Берём год начала и конца периода:
+    from_year = start_date.year
+    to_year = end_date.year
+
+    while True:
+        params = {
+            "page": page,
+            "limit": limit,
+            # Ограничиваем год выпуска, чтобы не тянуть весь архив.
+            "year": f"{from_year}-{to_year}",
+            # Сортируем по дате мировой премьеры, чтобы свежие были выше.
+            "sortField": "premiere.world",
+            "sortType": -1,
+        }
+
+        try:
+            data = _kp_dev_request(params)
+        except Exception as e:
+            logger.error(f"Ошибка запроса к kinopoisk.dev: {e}")
+            break
+
+        batch = data.get("docs", [])
+        if not batch:
+            break
+
+        docs.extend(batch)
+
+        # Если страница последняя — выходим.
+        total = data.get("total", 0)
+        if page * limit >= total:
+            break
+
+        page += 1
+        if page > 5:  # ограничение на количество страниц, чтобы не перетягивать всё API
+            break
+
+    releases: List[Dict] = []
+
+    for item in docs:
+        # Пытаемся вытащить дату премьеры — сначала мировую, потом российскую.[web:82]
+        premiere_info = item.get("premiere") or {}
+        date_str = premiere_info.get("world") or premiere_info.get("russia")
+
+        if not date_str:
+            continue
+
+        # Даты в kinopoisk.dev обычно в формате YYYY-MM-DD.
+        try:
+            rel_date = datetime.fromisoformat(date_str).date()
+        except Exception:
+            continue
+
+        if not (start_date <= rel_date <= end_date):
+            continue
+
+        kp_id = item.get("id")
+        name_ru = item.get("name") or ""
+        name_orig = item.get("alternativeName") or ""
+        year_val = item.get("year")
+
+        genres_list = item.get("genres") or []
+        genres = ", ".join(
+            g.get("name") if isinstance(g, dict) else str(g)
+            for g in genres_list
         )
 
-        releases: List[Dict] = []
+        description = item.get("shortDescription") or item.get("description") or ""
 
-        for film in films:
-            # film — dataclass или dict
-            kp_id = (
-                getattr(film, "kinopoiskId", None)
-                or getattr(film, "kp_id", None)
-                or (film.get("kinopoiskId", None) if isinstance(film, dict) else None)
-            )
-            name_ru = (
-                getattr(film, "nameRu", None)
-                or (film.get("nameRu", "") if isinstance(film, dict) else "")
-            )
-            name_en = (
-                getattr(film, "nameEn", None)
-                or (film.get("nameEn", "") if isinstance(film, dict) else "")
-            )
-            year_val = (
-                getattr(film, "year", None)
-                or (film.get("year", None) if isinstance(film, dict) else None)
-            )
+        rating_block = item.get("rating") or {}
+        rating_kp = rating_block.get("kp") or 0
+        votes_block = item.get("votes") or {}
+        votes_kp = votes_block.get("kp") or 0
 
-            # Описание и жанры
-            description = (
-                getattr(film, "description", None)
-                or (film.get("description", "") if isinstance(film, dict) else "")
-            )
-            genres_list = (
-                getattr(film, "genres", None)
-                or (film.get("genres", []) if isinstance(film, dict) else [])
-            )
-            if isinstance(genres_list, list):
-                genres = ", ".join(
-                    g.get("genre") if isinstance(g, dict) else str(g)
-                    for g in genres_list
-                )
-            else:
-                genres = str(genres_list)
+        release_data = {
+            "id": kp_id,
+            "nameRu": name_ru,
+            "nameOriginal": name_orig,
+            "year": year_val,
+            "genres": genres,
+            "description": description,
+            "release_date": rel_date,
+            "rating": rating_kp,
+            "expectationRating": 0,  # у kinopoisk.dev отдельного "ratingAwait" нет
+            "votes": votes_kp,
+        }
+        releases.append(release_data)
 
-            # Дата цифрового релиза (если поле есть)
-            if isinstance(film, dict):
-                digital_date_str = (
-                    film.get("digitalRelease")
-                    or film.get("releaseDate")
-                )
-            else:
-                digital_date_str = (
-                    getattr(film, "digitalRelease", None)
-                    or getattr(film, "releaseDate", None)
-                )
-
-            if not digital_date_str:
-                continue
-
-            try:
-                release_date = datetime.strptime(digital_date_str, "%Y-%m-%d").date()
-            except Exception:
-                continue
-
-            # Рейтинги
-            if isinstance(film, dict):
-                rating = film.get("ratingKinopoisk", 0) or 0
-                expectation_rating = film.get("ratingAwait", 0) or 0
-                votes = film.get("ratingKinopoiskVoteCount", 0) or 0
-            else:
-                rating = getattr(film, "ratingKinopoisk", 0) or 0
-                expectation_rating = getattr(film, "ratingAwait", 0) or 0
-                votes = getattr(film, "ratingKinopoiskVoteCount", 0) or 0
-
-            release_data = {
-                "id": kp_id,
-                "nameRu": name_ru or "",
-                "nameOriginal": name_en or "",
-                "year": year_val,
-                "genres": genres,
-                "description": description,
-                "release_date": release_date,
-                "rating": rating,
-                "expectationRating": expectation_rating,
-                "votes": votes,
-            }
-            releases.append(release_data)
-
-        return releases
-
-    except Exception as e:
-        logger.error(f"Ошибка при получении релизов через notkinopoiskapi: {e}")
-        return []
+    return releases
 
 
-def filter_releases_by_date(releases: List[Dict], target_date) -> List[Dict]:
-    """Фильтрует релизы по конкретной дате"""
+def filter_releases_by_date(releases: List[Dict], target_date: date) -> List[Dict]:
+    """Фильтрует релизы по конкретной дате."""
     return [r for r in releases if r["release_date"] == target_date]
 
 
-def filter_releases_by_period(releases: List[Dict], start_date, end_date) -> List[Dict]:
-    """Фильтрует релизы по периоду (включительно)"""
+def filter_releases_by_period(releases: List[Dict], start_date: date, end_date: date) -> List[Dict]:
+    """Фильтрует релизы по периоду (включительно)."""
     return [r for r in releases if start_date <= r["release_date"] <= end_date]
 
 
@@ -225,60 +213,34 @@ def sort_and_limit_releases(
 ) -> List[Dict]:
     """
     Сортирует релизы по популярности и ограничивает количество.
-    Для команды /week стремится к пропорции 7 сериалов : 3 фильма.
+    Для /week стараемся держать пропорцию сериалов/фильмов, но сейчас делим условно.
     """
     if len(releases) <= limit:
         return releases
 
     releases_sorted = sorted(
         releases,
-        key=lambda x: (x["expectationRating"] or x["rating"] or 0, x["votes"] or 0),
+        key=lambda x: (x["rating"] or 0, x["votes"] or 0),
         reverse=True,
     )
 
-    if series_count > 0 or movies_count > 0:
-        series = []
-        movies = []
-
-        for release in releases_sorted:
-            if len(series) < series_count:
-                series.append(release)
-            elif len(movies) < movies_count:
-                movies.append(release)
-            else:
-                break
-
-        result = series + movies
-        if len(result) < limit:
-            for release in releases_sorted:
-                if release not in result:
-                    result.append(release)
-                    if len(result) >= limit:
-                        break
-
-        return result[:limit]
-
+    # Пока нет явного разделения сериал/фильм, делаем простую выборку "верхних N".
     return releases_sorted[:limit]
 
 
-# ==== ФУНКЦИЯ ДЛЯ РАБОТЫ С YANDEXGPT ====
+# ==== YANDEXGPT ====
 
 def format_releases_with_yandexgpt(releases: List[Dict], command_type: str) -> Optional[str]:
-    """
-    Отправляет список релизов в YandexGPT для форматирования описаний
-    Возвращает готовый текст в формате Markdown или None при ошибке
-    """
+    """Отправляет релизы в YandexGPT и получает красиво оформленный Markdown."""
     if not releases:
         return None
 
-    context = "Список цифровых релизов:\n\n"
+    context = "Список релизов:\n\n"
     for i, release in enumerate(releases, 1):
         context += f"{i}. {release['nameRu']} ({release['year']})\n"
         context += f"Жанры: {release['genres']}\n"
-        if release["expectationRating"]:
-            context += f"Рейтинг ожидания: {release['expectationRating']}\n"
-        elif release["rating"]:
-            context += f"Рейтинг: {release['rating']}\n"
+        if release["rating"]:
+            context += f"Рейтинг Кинопоиска: {release['rating']} (голосов: {release['votes']})\n"
         context += f"Описание: {release['description']}\n"
         context += f"ID для ссылки: {release['id']}\n\n"
 
@@ -294,21 +256,16 @@ def format_releases_with_yandexgpt(releases: List[Dict], command_type: str) -> O
 
 ФОРМАТ ВЫВОДА (строго):
 
-1. __**Название фильма/сериала**__ (цифровой релиз)
+1. __**Название фильма/сериала**__ (премьера)
 https://www.kinopoisk.ru/film/ID/
 *жанр1, жанр2, жанр3*
 Описание релиза в 1-2 предложения, максимум 30 слов.
-
-2. __**Следующий релиз**__ (цифровой релиз)
-https://www.kinopoisk.ru/film/ID/
-*жанры*
-Описание.
 
 И так далее. Между релизами — пустая строка.
 
 ВАЖНО:
 - Название: одновременно жирное и подчёркнутое __**так**__
-- После названия в скобках: (цифровой релиз)
+- После названия в скобках: (премьера)
 - Ссылка на второй строке: https://www.kinopoisk.ru/film/ID/ (подставь реальный ID)
 - Жанры на третьей строке в курсиве: *жанр1, жанр2*
 - Описание — живое, без воды, 1-2 предложения, до 30 слов
@@ -355,10 +312,7 @@ https://www.kinopoisk.ru/film/ID/
 
 
 def format_releases_fallback(releases: List[Dict]) -> str:
-    """
-    Резервный формат без YandexGPT (если ИИ не отвечает)
-    Возвращает простой список с названиями и ссылками
-    """
+    """Резервный формат без YandexGPT."""
     text = ""
     for i, release in enumerate(releases, 1):
         text += f"{i}. **{release['nameRu']}**\n"
@@ -371,14 +325,13 @@ def format_releases_fallback(releases: List[Dict]) -> str:
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "🎬 **Добро пожаловать в бот онлайн-премьер!**\n\n"
-        "Я показываю цифровые релизы фильмов и сериалов на основе данных Кинопоиска "
+        "🎬 **Добро пожаловать в бот премьер!**\n\n"
+        "Я показываю премьеры фильмов и сериалов по данным kinopoisk.dev "
         "и формирую красивые описания с помощью YandexGPT.\n\n"
-        "**Доступные команды:**\n"
+        "**Команды:**\n"
         "/today — премьеры сегодня\n"
         "/week — премьеры за прошлую неделю\n"
-        "/help — справка\n\n"
-        "Выберите команду или нажмите кнопку ниже!"
+        "/help — справка\n"
     )
 
     keyboard = [["/today", "/week"], ["/help"]]
@@ -392,15 +345,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "📖 **Справка по боту**\n\n"
-        "**Команды:**\n"
-        "/start — главное меню и приветствие\n"
-        "/today — онлайн-премьеры сегодня\n"
-        "/week — онлайн-премьеры за прошлую неделю (полная неделя пн-вс)\n"
+        "/start — приветствие и меню\n"
+        "/today — премьеры за сегодня (по данным kinopoisk.dev)\n"
+        "/week — премьеры за прошлую неделю\n"
         "/help — эта справка\n\n"
-        "Бот собирает данные из Kinopoisk API Unofficial (через notkinopoiskapi) "
-        "и обрабатывает их через YandexGPT для создания красивых описаний.\n\n"
-        "Каждый понедельник в 10:00 МСК бот автоматически присылает подборку за прошлую неделю "
-        "(если настроен TARGET_CHAT_ID)."
+        "Данные берутся из kinopoisk.dev, описания дописывает YandexGPT."
     )
 
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
@@ -410,30 +359,26 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Ищу премьеры на сегодня...")
 
     today = get_today_date()
-    year = today.year
-    month = today.month
+    releases = get_releases_for_period(today, today)
 
-    releases = get_digital_releases(year, month)
-    today_releases = filter_releases_by_date(releases, today)
-
-    if not today_releases:
-        await update.message.reply_text("Сегодня онлайн премьер нет")
+    if not releases:
+        await update.message.reply_text("Сегодня премьер не найдено")
         return
 
-    filtered_releases = sort_and_limit_releases(today_releases, limit=10)
-    formatted_text = format_releases_with_yandexgpt(filtered_releases, "today")
+    filtered = sort_and_limit_releases(releases, limit=10)
+    formatted = format_releases_with_yandexgpt(filtered, "today")
 
-    if formatted_text:
-        response_text = f"**Что вышло сегодня:**\n\n{formatted_text}"
+    if formatted:
+        text = f"**Премьеры сегодня:**\n\n{formatted}"
     else:
-        response_text = f"**Что вышло сегодня:**\n\n{format_releases_fallback(filtered_releases)}"
-        response_text += "\n⚠️ _Описания временно недоступны (ошибка ИИ)_"
+        text = f"**Премьеры сегодня:**\n\n{format_releases_fallback(filtered)}"
+        text += "\n⚠️ _Описания временно недоступны (ошибка ИИ)_"
 
     keyboard = [[InlineKeyboardButton("Главное меню", callback_data="main_menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        response_text,
+        text,
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=reply_markup,
         disable_web_page_preview=True,
@@ -444,36 +389,26 @@ async def week_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Ищу премьеры за прошлую неделю...")
 
     start_date, end_date = get_last_full_week()
+    releases = get_releases_for_period(start_date, end_date)
 
-    releases: List[Dict] = []
-    for date_val in (
-        start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)
-    ):
-        day_releases = get_digital_releases(date_val.year, date_val.month)
-        releases.extend(day_releases)
-
-    week_releases = filter_releases_by_period(releases, start_date, end_date)
-
-    if not week_releases:
-        await update.message.reply_text("На прошлой неделе онлайн премьер не было")
+    if not releases:
+        await update.message.reply_text("На прошлой неделе премьер не найдено")
         return
 
-    filtered_releases = sort_and_limit_releases(
-        week_releases, limit=10, series_count=7, movies_count=3
-    )
-    formatted_text = format_releases_with_yandexgpt(filtered_releases, "week")
+    filtered = sort_and_limit_releases(releases, limit=10)
+    formatted = format_releases_with_yandexgpt(filtered, "week")
 
-    if formatted_text:
-        response_text = f"**Что вышло за неделю:**\n\n{formatted_text}"
+    if formatted:
+        text = f"**Премьеры за прошлую неделю:**\n\n{formatted}"
     else:
-        response_text = f"**Что вышло за неделю:**\n\n{format_releases_fallback(filtered_releases)}"
-        response_text += "\n⚠️ _Описания временно недоступны (ошибка ИИ)_"
+        text = f"**Премьеры за прошлую неделю:**\n\n{format_releases_fallback(filtered)}"
+        text += "\n⚠️ _Описания временно недоступны (ошибка ИИ)_"
 
     keyboard = [[InlineKeyboardButton("Главное меню", callback_data="main_menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        response_text,
+        text,
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=reply_markup,
         disable_web_page_preview=True,
@@ -486,11 +421,9 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     menu_text = (
         "🎬 **Главное меню**\n\n"
-        "Я показываю онлайн-премьеры фильмов и сериалов.\n\n"
-        "**Выберите команду:**\n"
         "/today — премьеры сегодня\n"
         "/week — премьеры за прошлую неделю\n"
-        "/help — подробная справка"
+        "/help — справка"
     )
 
     keyboard = [["/today", "/week"], ["/help"]]
@@ -501,60 +434,48 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
-# ==== АВТОРАССЫЛКА ПО ПОНЕДЕЛЬНИКАМ ====
+# ==== АВТОРАССЫЛКА ====
 
 async def weekly_auto_send(context: ContextTypes.DEFAULT_TYPE):
     if TARGET_CHAT_ID is None:
-        logger.warning("TARGET_CHAT_ID не установлен, авторассылка отключена")
+        logger.info("TARGET_CHAT_ID не установлен, авторассылка отключена")
         return
-
-    logger.info("Запуск авторассылки за прошлую неделю")
 
     start_date, end_date = get_last_full_week()
+    releases = get_releases_for_period(start_date, end_date)
 
-    releases: List[Dict] = []
-    for date_val in (
-        start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)
-    ):
-        day_releases = get_digital_releases(date_val.year, date_val.month)
-        releases.extend(day_releases)
-
-    week_releases = filter_releases_by_period(releases, start_date, end_date)
-
-    if not week_releases:
-        text = "На прошлой неделе онлайн премьер не было"
-        await context.bot.send_message(chat_id=TARGET_CHAT_ID, text=text)
+    if not releases:
+        await context.bot.send_message(
+            chat_id=TARGET_CHAT_ID,
+            text="На прошлой неделе премьер не найдено",
+        )
         return
 
-    filtered_releases = sort_and_limit_releases(
-        week_releases, limit=10, series_count=7, movies_count=3
-    )
-    formatted_text = format_releases_with_yandexgpt(filtered_releases, "week")
+    filtered = sort_and_limit_releases(releases, limit=10)
+    formatted = format_releases_with_yandexgpt(filtered, "week")
 
-    if formatted_text:
-        response_text = f"📅 **Еженедельная подборка**\n\n**Что вышло за неделю:**\n\n{formatted_text}"
+    if formatted:
+        text = f"📅 **Еженедельная подборка**\n\n**Премьеры за прошлую неделю:**\n\n{formatted}"
     else:
-        response_text = (
-            f"📅 **Еженедельная подборка**\n\n**Что вышло за неделю:**\n\n"
-            f"{format_releases_fallback(filtered_releases)}"
+        text = (
+            f"📅 **Еженедельная подборка**\n\n**Премьеры за прошлую неделю:**\n\n"
+            f"{format_releases_fallback(filtered)}"
         )
-        response_text += "\n⚠️ _Описания временно недоступны (ошибка ИИ)_"
+        text += "\n⚠️ _Описания временно недоступны (ошибка ИИ)_"
 
     keyboard = [[InlineKeyboardButton("Главное меню", callback_data="main_menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await context.bot.send_message(
         chat_id=TARGET_CHAT_ID,
-        text=response_text,
+        text=text,
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=reply_markup,
         disable_web_page_preview=True,
     )
 
-    logger.info("Авторассылка успешно отправлена")
 
-
-# ==== ГЛАВНАЯ ФУНКЦИЯ ====
+# ==== MAIN ====
 
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -570,16 +491,12 @@ def main():
         moscow_10am = datetime.now(MOSCOW_TZ).replace(
             hour=10, minute=0, second=0, microsecond=0
         ).timetz()
-
         job_queue.run_daily(
             weekly_auto_send,
             time=moscow_10am,
             days=(0,),
             name="weekly_releases",
         )
-        logger.info("Авторассылка настроена: каждый понедельник в 10:00 МСК")
-    else:
-        logger.info("TARGET_CHAT_ID не установлен, авторассылка отключена")
 
     logger.info("Бот запущен!")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
