@@ -67,9 +67,9 @@ def get_last_full_week() -> (date, date):
 KINOPOISK_DEV_URL = "https://api.kinopoisk.dev/v1.4/movie"
 
 
-def kp_dev_request_post(body: Dict) -> Dict:
+def kp_dev_request_get(params: Dict) -> Dict:
     """
-    Отправить POST-запрос к kinopoisk.dev с JSON-телом.
+    Отправить GET-запрос к kinopoisk.dev с query-параметрами.
     Используется для фильтрации по премьерам.
     """
     headers = {
@@ -77,7 +77,7 @@ def kp_dev_request_post(body: Dict) -> Dict:
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
-    response = requests.post(KINOPOISK_DEV_URL, headers=headers, json=body, timeout=20)
+    response = requests.get(KINOPOISK_DEV_URL, headers=headers, params=params, timeout=20)
     response.raise_for_status()
     return response.json()
 
@@ -85,100 +85,91 @@ def kp_dev_request_post(body: Dict) -> Dict:
 def get_releases_for_period(start_date: date, end_date: date) -> List[Dict]:
     """
     Получить релизы за указанный период из kinopoisk.dev.
-    
-    Теперь используем фильтр по полю premiere.russia с диапазоном дат.
-    Это позволяет API сразу вернуть только релизы с премьерой в нужный период.
+
+    Используем фильтр по полю premiere.russia с диапазоном дат.
     """
-    # Формируем даты в формате DD.MM.YYYY для kinopoisk.dev
     from_str = start_date.strftime("%d.%m.%Y")
     to_str = end_date.strftime("%d.%m.%Y")
-    
+
     docs: List[Dict] = []
     page = 1
     limit = 50
-    
-    # Собираем тело запроса с фильтром по премьере
-    request_body = {
-        "page": page,
-        "limit": limit,
-        "type": ["movie", "tv-series"],  # Фильмы и сериалы
-        "premiere.russia": f"{from_str}-{to_str}",  # Диапазон премьер в России
-        "notNullFields": ["premiere.russia", "name"],  # Обязательные поля
-        "sortField": ["premiere.russia"],
-        "sortType": [-1],  # Сортировка по убыванию (новые сначала)
-    }
-    
+
     logger.info(f"Запрос к kinopoisk.dev за период {from_str} - {to_str}")
-    
-    # Запрашиваем данные (можем получить несколько страниц)
+
     while True:
-        request_body["page"] = page
-        
+        params = {
+            "page": page,
+            "limit": limit,
+            "type": ["movie", "tv-series"],
+            "premiere.russia": f"{from_str}-{to_str}",
+            "notNullFields": ["premiere.russia", "name"],
+            "sortField": ["premiere.russia"],
+            "sortType": [-1],
+        }
+
         try:
-            data = kp_dev_request_post(request_body)
+            data = kp_dev_request_get(params)
         except Exception as e:
             logger.error(f"Ошибка запроса к kinopoisk.dev: {e}")
             break
-        
+
         batch = data.get("docs", [])
         if not batch:
             break
-        
+
         docs.extend(batch)
-        
-        # Проверяем, есть ли ещё страницы
+
         total = data.get("total", 0)
         if page * limit >= total:
             break
-        
+
         page += 1
-        
-        # Ограничение: не больше 5 страниц (250 фильмов), чтобы не перегружать API
+
         if page > 5:
             logger.info("Достигнут лимит страниц (5), прекращаем запросы")
             break
-    
+
     logger.info(f"Получено {len(docs)} релизов от kinopoisk.dev")
-    
-    # Преобразуем данные в удобный формат
+
     releases: List[Dict] = []
     for item in docs:
-        # Извлекаем дату премьеры
         premiere_info = item.get("premiere") or {}
         date_str = premiere_info.get("russia") or premiere_info.get("world")
         if not date_str:
             continue
-        
-        # Парсим дату
+
         try:
-            rel_date = datetime.fromisoformat(date_str).date()
+            if "T" in date_str:
+                date_str_clean = date_str.split("T")[0]
+                rel_date = datetime.strptime(date_str_clean, "%Y-%m-%d").date()
+            else:
+                rel_date = datetime.fromisoformat(date_str).date()
         except Exception:
             continue
-        
-        # Дополнительная проверка: дата должна быть в нужном периоде
-        # (API должен это фильтровать, но на всякий случай)
+
         if not (start_date <= rel_date <= end_date):
             continue
-        
+
         kp_id = item.get("id")
         name_ru = item.get("name") or ""
         name_orig = item.get("alternativeName") or ""
         year_val = item.get("year")
-        
+
         genres_list = item.get("genres") or []
         genres = ", ".join(
             g.get("name") if isinstance(g, dict) else str(g)
             for g in genres_list
         )
-        
+
         description = item.get("shortDescription") or item.get("description") or ""
-        
+
         rating_block = item.get("rating") or {}
         rating_kp = rating_block.get("kp") or 0
-        
+
         votes_block = item.get("votes") or {}
         votes_kp = votes_block.get("kp") or 0
-        
+
         release_data = {
             "id": kp_id,
             "nameRu": name_ru,
@@ -188,11 +179,11 @@ def get_releases_for_period(start_date: date, end_date: date) -> List[Dict]:
             "description": description,
             "releaseDate": rel_date,
             "rating": rating_kp,
-            "expectationRating": 0,  # kinopoisk.dev не предоставляет ratingAwait напрямую
+            "expectationRating": 0,
             "votes": votes_kp,
         }
         releases.append(release_data)
-    
+
     return releases
 
 
@@ -214,20 +205,19 @@ def sort_and_limit_releases(
 ) -> List[Dict]:
     """
     Отсортировать релизы по рейтингу и ограничить количество.
-    
+
     Для команды week используется ограничение количества.
     Для команды today просто берём топ N по рейтингу.
     """
     if len(releases) <= limit:
         return releases
-    
-    # Сортируем по рейтингу и голосам
+
     releases_sorted = sorted(
         releases,
         key=lambda x: (x["rating"] or 0, x["votes"] or 0),
         reverse=True,
     )
-    
+
     return releases_sorted[:limit]
 
 
@@ -240,8 +230,7 @@ def format_releases_with_yandex_gpt(releases: List[Dict], command_type: str) -> 
     """
     if not releases:
         return None
-    
-    # Собираем контекст для GPT
+
     context = ""
     for i, release in enumerate(releases, 1):
         context += f"{i}. {release['nameRu']} ({release['year']})\n"
@@ -250,7 +239,7 @@ def format_releases_with_yandex_gpt(releases: List[Dict], command_type: str) -> 
             context += f"   Рейтинг: {release['rating']} ({release['votes']} голосов)\n"
         context += f"   Описание: {release['description']}\n"
         context += f"   ID: {release['id']}\n"
-    
+
     prompt = f"""Ты — редактор подборок фильмов и сериалов. Ниже список из {len(releases)} релизов.
 
 Отформатируй их в виде Markdown по следующим правилам:
@@ -270,7 +259,7 @@ def format_releases_with_yandex_gpt(releases: List[Dict], command_type: str) -> 
 Список релизов:
 {context}
 """
-    
+
     try:
         url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
         headers = {
@@ -278,7 +267,7 @@ def format_releases_with_yandex_gpt(releases: List[Dict], command_type: str) -> 
             "Authorization": f"Api-Key {YANDEX_API_KEY}",
             "x-folder-id": YANDEX_FOLDER_ID,
         }
-        
+
         data = {
             "modelUri": f"gpt://{YANDEX_FOLDER_ID}/yandexgpt-lite",
             "completionOptions": {
@@ -297,15 +286,15 @@ def format_releases_with_yandex_gpt(releases: List[Dict], command_type: str) -> 
                 },
             ],
         }
-        
+
         response = requests.post(url, headers=headers, json=data, timeout=30)
         response.raise_for_status()
         result = response.json()
-        
+
         if "result" in result and "alternatives" in result["result"]:
             text = result["result"]["alternatives"][0]["message"]["text"]
             return text.strip()
-        
+
         return None
     except Exception as e:
         logger.error(f"Ошибка при обращении к YandexGPT: {e}")
@@ -340,7 +329,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
     keyboard = [["today"], ["week"], ["help"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    
+
     await update.message.reply_text(
         welcome_text,
         parse_mode=ParseMode.MARKDOWN,
@@ -364,27 +353,27 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Ищу премьеры на сегодня...")
-    
+
     today = get_today_date()
     releases = get_releases_for_period(today, today)
-    
+
     if not releases:
         await update.message.reply_text("На сегодня премьер не найдено 😔")
         return
-    
+
     filtered = sort_and_limit_releases(releases, limit=10)
     formatted = format_releases_with_yandex_gpt(filtered, "today")
-    
+
     if formatted:
         text = f"**Премьеры на сегодня:**\n\n{formatted}"
     else:
         text = f"**Премьеры на сегодня:**\n\n{format_releases_fallback(filtered)}"
-    
+
     text += "\n\n_Данные от kinopoisk.dev_"
-    
+
     keyboard = [[InlineKeyboardButton("↩️ Главное меню", callback_data="main_menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
+
     await update.message.reply_text(
         text,
         parse_mode=ParseMode.MARKDOWN,
@@ -395,27 +384,27 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def week_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Ищу премьеры за прошлую неделю...")
-    
+
     start_date, end_date = get_last_full_week()
     releases = get_releases_for_period(start_date, end_date)
-    
+
     if not releases:
         await update.message.reply_text("За прошлую неделю премьер не найдено 😔")
         return
-    
+
     filtered = sort_and_limit_releases(releases, limit=10)
     formatted = format_releases_with_yandex_gpt(filtered, "week")
-    
+
     if formatted:
         text = f"**Премьеры за прошлую неделю:**\n\n{formatted}"
     else:
         text = f"**Премьеры за прошлую неделю:**\n\n{format_releases_fallback(filtered)}"
-    
+
     text += "\n\n_Данные от kinopoisk.dev_"
-    
+
     keyboard = [[InlineKeyboardButton("↩️ Главное меню", callback_data="main_menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
+
     await update.message.reply_text(
         text,
         parse_mode=ParseMode.MARKDOWN,
@@ -427,11 +416,11 @@ async def week_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
+
     menu_text = "Выберите команду:"
     keyboard = [["today"], ["week"], ["help"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    
+
     await query.message.reply_text(
         menu_text,
         parse_mode=ParseMode.MARKDOWN,
@@ -449,30 +438,30 @@ async def weekly_auto_send(context: ContextTypes.DEFAULT_TYPE):
     if TARGET_CHAT_ID is None:
         logger.info("TARGET_CHAT_ID не задан, пропускаем автоотправку")
         return
-    
+
     start_date, end_date = get_last_full_week()
     releases = get_releases_for_period(start_date, end_date)
-    
+
     if not releases:
         await context.bot.send_message(
             chat_id=TARGET_CHAT_ID,
             text="За прошлую неделю премьер не найдено 😔",
         )
         return
-    
+
     filtered = sort_and_limit_releases(releases, limit=10)
     formatted = format_releases_with_yandex_gpt(filtered, "week")
-    
+
     if formatted:
         text = f"**Премьеры за прошлую неделю:**\n\n{formatted}"
     else:
         text = f"**Премьеры за прошлую неделю:**\n\n{format_releases_fallback(filtered)}"
-    
+
     text += "\n\n_Данные от kinopoisk.dev_"
-    
+
     keyboard = [[InlineKeyboardButton("↩️ Главное меню", callback_data="main_menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
+
     await context.bot.send_message(
         chat_id=TARGET_CHAT_ID,
         text=text,
@@ -487,25 +476,24 @@ async def weekly_auto_send(context: ContextTypes.DEFAULT_TYPE):
 # ===========================================
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
-    
+
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("today", today_command))
     application.add_handler(CommandHandler("week", week_command))
     application.add_handler(CallbackQueryHandler(main_menu_callback, pattern="main_menu"))
-    
-    # Настройка автоматической рассылки (если задан TARGET_CHAT_ID)
+
     if TARGET_CHAT_ID is not None:
         job_queue = application.job_queue
         moscow_10am = datetime.now(MOSCOW_TZ).replace(hour=10, minute=0, second=0, microsecond=0).timetz()
         job_queue.run_daily(
             weekly_auto_send,
             time=moscow_10am,
-            days=(0,),  # 0 = понедельник
+            days=(0,),
             name="weekly_releases",
         )
         logger.info("Автоматическая рассылка настроена!")
-    
+
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
